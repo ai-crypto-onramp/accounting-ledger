@@ -1,14 +1,14 @@
 [package]
-name = "ledger-accounting"
+name = "accounting-ledger"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "ledger_accounting"
+name = "accounting_ledger"
 path = "src/lib.rs"
 
 [[bin]]
-name = "ledger-accounting"
+name = "accounting-ledger"
 path = "src/main.rs"
 
 [dependencies]

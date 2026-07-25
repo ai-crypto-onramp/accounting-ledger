@@ -1,9 +1,9 @@
-use ledger_accounting::audit;
-use ledger_accounting::authtoken;
-use ledger_accounting::config;
-use ledger_accounting::grpc;
-use ledger_accounting::handlers;
-use ledger_accounting::store::Store;
+use accounting_ledger::audit;
+use accounting_ledger::authtoken;
+use accounting_ledger::config;
+use accounting_ledger::grpc;
+use accounting_ledger::handlers;
+use accounting_ledger::store::Store;
 use opentelemetry::{global, trace::TracerProvider as _, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{runtime::Tokio, Resource};
@@ -177,9 +177,9 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
-    use ledger_accounting::chart;
-    use ledger_accounting::posting::PostingRequest;
-    use ledger_accounting::store::Store;
+    use accounting_ledger::chart;
+    use accounting_ledger::posting::PostingRequest;
+    use accounting_ledger::store::Store;
     use serde_json::{json, Value};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::ServiceExt;

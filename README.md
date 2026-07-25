@@ -1,7 +1,7 @@
 # Ledger / Accounting
 
-![CI](https://github.com/ai-crypto-onramp/ledger-accounting/actions/workflows/ci.yml/badge.svg)
-[![codecov](https://codecov.io/gh/ai-crypto-onramp/ledger-accounting/branch/main/graph/badge.svg)](https://codecov.io/gh/ai-crypto-onramp/ledger-accounting)
+![CI](https://github.com/ai-crypto-onramp/accounting-ledger/actions/workflows/ci.yml/badge.svg)
+[![codecov](https://codecov.io/gh/ai-crypto-onramp/accounting-ledger/branch/main/graph/badge.svg)](https://codecov.io/gh/ai-crypto-onramp/accounting-ledger)
 
 Immutable double-entry ledger — the single source of financial truth. Correctness over everything.
 

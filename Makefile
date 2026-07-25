@@ -10,10 +10,10 @@ run:
 	cargo run --release
 
 docker-build:
-	docker build -t ai-crypto-onramp/ledger-accounting .
+	docker build -t ai-crypto-onramp/accounting-ledger .
 
 docker-run:
-	docker run --rm -p 8080:8080 ai-crypto-onramp/ledger-accounting
+	docker run --rm -p 8080:8080 ai-crypto-onramp/accounting-ledger
 
 clean:
 	cargo clean

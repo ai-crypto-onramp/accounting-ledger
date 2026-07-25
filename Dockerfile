@@ -19,11 +19,11 @@ COPY src/ ./src/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     touch src/main.rs src/lib.rs && cargo build --release \
-    && cp target/release/ledger-accounting /ledger-accounting
+    && cp target/release/accounting-ledger /accounting-ledger
 
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /ledger-accounting /server
+COPY --from=builder /accounting-ledger /server
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD wget -qO- http://localhost:8080/healthz || exit 1
