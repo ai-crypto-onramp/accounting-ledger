@@ -174,12 +174,12 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use http_body_util::BodyExt;
     use accounting_ledger::chart;
     use accounting_ledger::posting::PostingRequest;
     use accounting_ledger::store::Store;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
     use serde_json::{json, Value};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::ServiceExt;
