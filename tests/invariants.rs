@@ -1,5 +1,5 @@
-use ledger_accounting::posting::PostingRequest;
-use ledger_accounting::store::Store;
+use accounting_ledger::posting::PostingRequest;
+use accounting_ledger::store::Store;
 use serde_json::json;
 
 fn create_account_body(id: &str, type_name: &str, asset_class: &str) -> serde_json::Value {

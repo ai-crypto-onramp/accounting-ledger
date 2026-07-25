@@ -1,5 +1,5 @@
-use ledger_accounting::posting::PostingRequest;
-use ledger_accounting::store::Store;
+use accounting_ledger::posting::PostingRequest;
+use accounting_ledger::store::Store;
 use serde_json::json;
 use std::sync::OnceLock;
 use tokio::sync::Mutex;
