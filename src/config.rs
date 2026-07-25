@@ -112,6 +112,8 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn default_has_expected_values() {
@@ -161,10 +163,7 @@ mod tests {
 
     #[test]
     fn from_env_reads_overrides() {
-        // Tests may run in parallel; use a mutex to serialize env mutation.
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _g = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _g = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
 
         // Save existing values to restore afterwards.
         let keys = [
@@ -220,9 +219,7 @@ mod tests {
 
     #[test]
     fn from_env_ignores_invalid_numeric_overrides() {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _g = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _g = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
 
         let saved = std::env::var("PORT").ok();
         std::env::set_var("PORT", "not-a-port");
