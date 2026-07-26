@@ -239,6 +239,7 @@ fn posting_to_pb(p: &crate::posting::PostingRecord) -> PbPostingRecord {
 // in the store. For the fiat leg of a purchase saga: debit user_custodial and
 // credit operational_fiat. Returns InvalidArgument if no matching accounts are
 // found.
+#[allow(clippy::result_large_err)]
 fn resolve_double_entry_accounts(
     store: &Store,
     asset: &str,
