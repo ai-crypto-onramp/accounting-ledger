@@ -13,6 +13,13 @@ use crate::snapshot::BalanceSnapshot;
 pub const MAX_ENTRIES_PER_POSTING: usize = 64;
 pub const MAX_AMOUNT: u64 = 1_000_000_000_000;
 
+// Advisory lock key for the entries hash-chain. Acquired with
+// pg_advisory_xact_lock inside the posting transaction so concurrent
+// ingests serialize on the chain tip and cannot fork it. Stable int64
+// derived from a fixed constant (not the table name) so it is identical
+// across all replicas/environments.
+pub const ENTRIES_CHAIN_ADVISORY_LOCK_KEY: i64 = 0x61_6c_65_64_67_65_72;
+
 pub const MIGRATION_INIT_SCHEMA: &str =
     include_str!("../migrations/20240101000001_init_schema.sql");
 pub const MIGRATION_SET_SERIALIZABLE: &str =
@@ -757,8 +764,30 @@ impl Store {
         }
 
         let now = now_iso();
-        let prev_hash_initial =
-            last_entry_hash_from_db(pool).unwrap_or_else(|| GENESIS_HASH.to_string());
+
+        // Begin the chain-extension transaction FIRST, then read the chain
+        // tip (prev_hash + max sequence) inside it under SERIALIZABLE
+        // isolation + a transaction-scoped advisory lock. This serializes
+        // concurrent ingests on the chain tip so two replicas cannot read
+        // the same prev_hash and fork the chain. The lock is released on
+        // COMMIT/ROLLBACK.
+        let mut tx = block_on(pool.begin())
+            .map_err(|e| PostError::Validation(format!("post: begin tx: {}", e)))?;
+        block_on(
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE").execute(&mut *tx),
+        )
+        .map_err(|e| PostError::Validation(format!("post: set serializable: {}", e)))?;
+        block_on(
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(ENTRIES_CHAIN_ADVISORY_LOCK_KEY)
+                .execute(&mut *tx),
+        )
+        .map_err(|e| PostError::Validation(format!("post: advisory lock: {}", e)))?;
+
+        let prev_hash_initial = last_entry_hash_from_tx(&mut tx)
+            .unwrap_or_else(|| GENESIS_HASH.to_string());
+        let mut seq_cursor = next_sequence_from_tx(&mut tx)
+            .map_err(|e| PostError::Validation(format!("post: next sequence: {}", e)))?;
 
         let mut prev_hash = prev_hash_initial.clone();
         let mut entry_ids: Vec<String> = Vec::new();
@@ -800,8 +829,6 @@ impl Store {
         let hash_head = prev_hash.clone();
         let global_sequence_head = hash_head.clone();
 
-        let mut tx = block_on(pool.begin())
-            .map_err(|e| PostError::Validation(format!("post: begin tx: {}", e)))?;
         let inserted_posting = block_on(
             sqlx::query(
                 "INSERT INTO postings (posting_id, ref_tx_id, memo, status, hash_chain_head, created_at, updated_at)
@@ -848,8 +875,6 @@ impl Store {
             ));
         }
 
-        let mut seq_cursor = next_sequence_from_db(pool, &prev_hash_initial)
-            .map_err(|e| PostError::Validation(format!("post: next sequence: {}", e)))?;
         for e in &mut created_entries {
             seq_cursor += 1;
             e.sequence_number = seq_cursor;
@@ -1522,10 +1547,35 @@ fn last_entry_hash_from_db(pool: &sqlx::PgPool) -> Option<String> {
     row.map(|(h,)| h)
 }
 
+#[allow(dead_code)]
 fn next_sequence_from_db(pool: &sqlx::PgPool, _prev_hash: &str) -> Result<u64, String> {
     let (max_seq,): (i64,) = block_on(
         sqlx::query_as::<_, (i64,)>("SELECT COALESCE(MAX(sequence_number), 0) FROM entries")
             .fetch_one(pool),
+    )
+    .map_err(|e| format!("next_sequence: {}", e))?;
+    Ok(max_seq as u64)
+}
+
+fn last_entry_hash_from_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Option<String> {
+    let row: Option<(String,)> = block_on(
+        sqlx::query_as::<_, (String,)>(
+            "SELECT this_hash FROM entries ORDER BY sequence_number DESC LIMIT 1",
+        )
+        .fetch_optional(&mut **tx),
+    )
+    .ok()?;
+    row.map(|(h,)| h)
+}
+
+fn next_sequence_from_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<u64, String> {
+    let (max_seq,): (i64,) = block_on(
+        sqlx::query_as::<_, (i64,)>("SELECT COALESCE(MAX(sequence_number), 0) FROM entries")
+            .fetch_one(&mut **tx),
     )
     .map_err(|e| format!("next_sequence: {}", e))?;
     Ok(max_seq as u64)
