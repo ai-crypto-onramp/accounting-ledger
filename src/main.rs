@@ -75,7 +75,9 @@ async fn run_grpc(store: Store, addr: std::net::SocketAddr) {
     let builder = TonicServer::builder();
     let router = builder
         .layer(tonic::service::interceptor(
-            move |req: tonic::Request<()>| authtoken::check_grpc(&req, secret.as_deref()).map(|()| req),
+            move |req: tonic::Request<()>| {
+                authtoken::check_grpc(&req, secret.as_deref()).map(|()| req)
+            },
         ))
         .add_service(svc);
     if let Err(e) = router.serve(addr).await {
