@@ -75,6 +75,7 @@ async fn run_grpc(store: Store, addr: std::net::SocketAddr) {
     let builder = TonicServer::builder();
     let router = builder
         .layer(tonic::service::interceptor(
+            #[allow(clippy::result_large_err)]
             move |req: tonic::Request<()>| {
                 authtoken::check_grpc(&req, secret.as_deref()).map(|()| req)
             },

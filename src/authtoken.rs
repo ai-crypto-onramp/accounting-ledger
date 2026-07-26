@@ -85,6 +85,7 @@ pub struct SharedSecret(pub String);
 /// responsible for bypassing health/reflection methods before calling this.
 /// Returns `Ok(())` when bypassed (no secret configured) or a valid token is
 /// present.
+#[allow(clippy::result_large_err)]
 pub fn check_grpc<T>(req: &TonicRequest<T>, secret: Option<&str>) -> Result<(), Status> {
     let Some(secret) = secret else {
         return Ok(());
