@@ -8,12 +8,12 @@ pub mod ledger {
     tonic::include_proto!("ledger.v1");
 }
 
-use ledger::ledger_server::{Ledger, LedgerServer};
+use ledger::ledger_service_server::{LedgerService, LedgerServiceServer};
 use ledger::{
     BalanceResponse, CreateAccountRequest as PbCreateAccountRequest, CreateAccountResponse,
-    GetBalanceRequest, GetPostingRequest, PostingRecord as PbPostingRecord,
-    PostingRequest as PbPostingRequest, PostingResponse as PbPostingResponse, VerifyChainRequest,
-    VerifyChainResponse,
+    GetBalanceRequest, GetPostingRequest, PostDoubleEntryRequest, PostDoubleEntryResponse,
+    PostingRecord as PbPostingRecord, PostingRequest as PbPostingRequest,
+    PostingResponse as PbPostingResponse, VerifyChainRequest, VerifyChainResponse,
 };
 
 pub struct LedgerGrpc {
@@ -41,7 +41,7 @@ impl LedgerGrpc {
 }
 
 #[tonic::async_trait]
-impl Ledger for LedgerGrpc {
+impl LedgerService for LedgerGrpc {
     async fn create_account(
         &self,
         req: Request<PbCreateAccountRequest>,
@@ -49,11 +49,11 @@ impl Ledger for LedgerGrpc {
         self.authorize(req.metadata().get("x-caller").and_then(|v| v.to_str().ok()))?;
         let req = req.into_inner();
         let account_req = AcctReq {
-            account_id: req.account_id,
+            account_id: opt_string(req.account_id),
             type_name: req.r#type,
             asset_class: req.asset_class,
             label: req.label,
-            parent_id: req.parent_id,
+            parent_id: opt_string(req.parent_id),
         };
         match self.store.create_account(account_req) {
             Ok(acc) => Ok(Response::new(CreateAccountResponse {
@@ -82,14 +82,56 @@ impl Ledger for LedgerGrpc {
         let post_req = PostReq {
             posting_id: req.posting_id,
             entries,
-            memo: req.memo,
-            ref_tx_id: req.ref_tx_id,
+            memo: opt_string(req.memo),
+            ref_tx_id: opt_string(req.ref_tx_id),
         };
         match self.store.post(post_req) {
             Ok((resp, _replay)) => Ok(Response::new(PbPostingResponse {
                 posting_id: resp.posting_id,
                 status: resp.status,
                 entry_ids: resp.entry_ids,
+                hash_head: resp.hash_head,
+            })),
+            Err(e) => Err(Status::invalid_argument(e.message())),
+        }
+    }
+
+    async fn post_double_entry(
+        &self,
+        req: Request<PostDoubleEntryRequest>,
+    ) -> Result<Response<PostDoubleEntryResponse>, Status> {
+        self.authorize(req.metadata().get("x-caller").and_then(|v| v.to_str().ok()))?;
+        let req = req.into_inner();
+        let debit_account = opt_string(req.debit_account_id);
+        let credit_account = opt_string(req.credit_account_id);
+        let (debit, credit) = match (debit_account, credit_account) {
+            (Some(d), Some(c)) => (d, c),
+            _ => resolve_double_entry_accounts(&self.store, &req.asset, &req.rail)?,
+        };
+        let entries = vec![
+            crate::posting::EntryInput {
+                account_id: debit.clone(),
+                direction: "DEBIT".to_string(),
+                amount: req.amount,
+                asset: req.asset.clone(),
+            },
+            crate::posting::EntryInput {
+                account_id: credit.clone(),
+                direction: "CREDIT".to_string(),
+                amount: req.amount,
+                asset: req.asset.clone(),
+            },
+        ];
+        let post_req = PostReq {
+            posting_id: req.tx_id.clone(),
+            entries,
+            memo: opt_string(req.memo),
+            ref_tx_id: Some(req.tx_id),
+        };
+        match self.store.post(post_req) {
+            Ok((resp, _replay)) => Ok(Response::new(PostDoubleEntryResponse {
+                journal_id: resp.posting_id,
+                status: resp.status,
                 hash_head: resp.hash_head,
             })),
             Err(e) => Err(Status::invalid_argument(e.message())),
@@ -115,7 +157,7 @@ impl Ledger for LedgerGrpc {
         req: Request<GetBalanceRequest>,
     ) -> Result<Response<BalanceResponse>, Status> {
         let req = req.into_inner();
-        let asset = req.asset.unwrap_or_default();
+        let asset = req.asset;
         match self.store.balance(&req.account_id, &asset) {
             Some(bal) => Ok(Response::new(BalanceResponse {
                 account_id: req.account_id,
@@ -142,23 +184,34 @@ impl Ledger for LedgerGrpc {
         match result {
             Ok(()) => Ok(Response::new(VerifyChainResponse {
                 ok: true,
-                entry_id: None,
-                reason: None,
+                entry_id: String::new(),
+                reason: String::new(),
             })),
             Err(b) => Ok(Response::new(VerifyChainResponse {
                 ok: false,
-                entry_id: Some(b.entry_id),
-                reason: Some(b.reason),
+                entry_id: b.entry_id,
+                reason: b.reason,
             })),
         }
+    }
+}
+
+// opt_string converts a canonical proto String field (which is "" when unset
+// under proto3) to an Option<String>, treating empty as absent. This preserves
+// the existing internal-store semantics where empty fields are None.
+fn opt_string(s: String) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
     }
 }
 
 fn posting_to_pb(p: &crate::posting::PostingRecord) -> PbPostingRecord {
     PbPostingRecord {
         posting_id: p.posting_id.clone(),
-        ref_tx_id: p.ref_tx_id.clone(),
-        memo: p.memo.clone(),
+        ref_tx_id: p.ref_tx_id.clone().unwrap_or_default(),
+        memo: p.memo.clone().unwrap_or_default(),
         status: p.status.clone(),
         hash_head: p.hash_head.clone(),
         entries: p
@@ -181,8 +234,36 @@ fn posting_to_pb(p: &crate::posting::PostingRecord) -> PbPostingRecord {
     }
 }
 
-pub fn server(store: Store, allowed_callers: Vec<String>) -> LedgerServer<LedgerGrpc> {
-    LedgerServer::new(LedgerGrpc::new(store, allowed_callers))
+// resolve_double_entry_accounts resolves the canonical debit/credit account
+// ids for a (asset, rail) pair by looking up accounts of the appropriate type
+// in the store. For the fiat leg of a purchase saga: debit user_custodial and
+// credit operational_fiat. Returns InvalidArgument if no matching accounts are
+// found.
+fn resolve_double_entry_accounts(
+    store: &Store,
+    asset: &str,
+    _rail: &str,
+) -> Result<(String, String), Status> {
+    let debit = store
+        .list_accounts(Some("user_custodial"))
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            Status::invalid_argument("no user_custodial account found for double-entry")
+        })?;
+    let credit = store
+        .list_accounts(Some("operational_fiat"))
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            Status::invalid_argument("no operational_fiat account found for double-entry")
+        })?;
+    let _ = asset;
+    Ok((debit.account_id, credit.account_id))
+}
+
+pub fn server(store: Store, allowed_callers: Vec<String>) -> LedgerServiceServer<LedgerGrpc> {
+    LedgerServiceServer::new(LedgerGrpc::new(store, allowed_callers))
 }
 
 #[cfg(test)]
@@ -253,11 +334,11 @@ mod tests {
 
         // Success path with authorized caller.
         let mut req = Request::new(PbCreateAccountRequest {
-            account_id: Some("op".to_string()),
+            account_id: "op".to_string(),
             r#type: "operational_fiat".to_string(),
             asset_class: "FIAT".to_string(),
             label: "op".to_string(),
-            parent_id: None,
+            parent_id: String::new(),
         });
         req.metadata_mut()
             .insert("x-caller", "caller".parse().unwrap());
@@ -266,11 +347,11 @@ mod tests {
 
         // Failure path: unknown account type with authorized caller.
         let mut req2 = Request::new(PbCreateAccountRequest {
-            account_id: Some("bad".to_string()),
+            account_id: "bad".to_string(),
             r#type: "bogus".to_string(),
             asset_class: "FIAT".to_string(),
             label: "bad".to_string(),
-            parent_id: None,
+            parent_id: String::new(),
         });
         req2.metadata_mut()
             .insert("x-caller", "caller".parse().unwrap());
@@ -278,11 +359,11 @@ mod tests {
 
         // Unauthorized: no caller header.
         let req3 = Request::new(PbCreateAccountRequest {
-            account_id: Some("x".to_string()),
+            account_id: "x".to_string(),
             r#type: "user_custodial".to_string(),
             asset_class: "FIAT".to_string(),
             label: "x".to_string(),
-            parent_id: None,
+            parent_id: String::new(),
         });
         assert!(svc.create_account(req3).await.is_err());
     }
@@ -306,8 +387,8 @@ mod tests {
         let mut req = Request::new(PbPostingRequest {
             posting_id: "p1".to_string(),
             entries: vec![],
-            memo: None,
-            ref_tx_id: None,
+            memo: String::new(),
+            ref_tx_id: String::new(),
         });
         req.metadata_mut()
             .insert("x-caller", "caller".parse().unwrap());
@@ -331,8 +412,8 @@ mod tests {
                     asset: "USD".to_string(),
                 },
             ],
-            memo: None,
-            ref_tx_id: None,
+            memo: String::new(),
+            ref_tx_id: String::new(),
         });
         req.metadata_mut()
             .insert("x-caller", "caller".parse().unwrap());
@@ -358,8 +439,8 @@ mod tests {
                     asset: "USD".to_string(),
                 },
             ],
-            memo: None,
-            ref_tx_id: None,
+            memo: String::new(),
+            ref_tx_id: String::new(),
         });
         assert!(svc.post_posting(req).await.is_err());
     }
@@ -413,7 +494,7 @@ mod tests {
 
         let req = Request::new(GetBalanceRequest {
             account_id: "uc".to_string(),
-            asset: Some("USD".to_string()),
+            asset: "USD".to_string(),
         });
         let resp = svc.get_balance(req).await.unwrap().into_inner();
         assert_eq!(resp.account_id, "uc");
@@ -423,7 +504,7 @@ mod tests {
         // No asset -> "all".
         let req = Request::new(GetBalanceRequest {
             account_id: "uc".to_string(),
-            asset: None,
+            asset: String::new(),
         });
         let resp = svc.get_balance(req).await.unwrap().into_inner();
         assert_eq!(resp.asset, "all");
@@ -431,7 +512,7 @@ mod tests {
         // Unknown account -> not found.
         let req = Request::new(GetBalanceRequest {
             account_id: "nope".to_string(),
-            asset: None,
+            asset: String::new(),
         });
         assert!(svc.get_balance(req).await.is_err());
     }
@@ -467,8 +548,8 @@ mod tests {
         let req = Request::new(VerifyChainRequest {});
         let resp = svc.verify_chain(req).await.unwrap().into_inner();
         assert!(!resp.ok);
-        assert!(resp.entry_id.is_some());
-        assert!(resp.reason.is_some());
+        assert!(!resp.entry_id.is_empty());
+        assert!(!resp.reason.is_empty());
     }
 
     #[test]
@@ -500,8 +581,8 @@ mod tests {
         };
         let pb = posting_to_pb(&rec);
         assert_eq!(pb.posting_id, "p1");
-        assert_eq!(pb.ref_tx_id.as_deref(), Some("tx"));
-        assert_eq!(pb.memo.as_deref(), Some("m"));
+        assert_eq!(pb.ref_tx_id, "tx");
+        assert_eq!(pb.memo, "m");
         assert_eq!(pb.status, "POSTED");
         assert_eq!(pb.hash_head, "hh");
         assert_eq!(pb.entries.len(), 1);
