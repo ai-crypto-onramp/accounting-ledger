@@ -71,7 +71,14 @@ async fn run_grpc(store: Store, addr: std::net::SocketAddr) {
         .unwrap_or_else(|_| "transaction-orchestrator,treasury-orchestration".to_string());
     let allowed_callers: Vec<String> = caller.split(',').map(|s| s.trim().to_string()).collect();
     let svc = grpc::server(store, allowed_callers);
-    if let Err(e) = TonicServer::builder().add_service(svc).serve(addr).await {
+    let secret = authtoken::secret_from_env();
+    let builder = TonicServer::builder();
+    let router = builder
+        .layer(tonic::service::interceptor(
+            move |req: tonic::Request<()>| authtoken::check_grpc(&req, secret.as_deref()).map(|()| req),
+        ))
+        .add_service(svc);
+    if let Err(e) = router.serve(addr).await {
         eprintln!("[grpc] server error: {}", e);
     }
 }

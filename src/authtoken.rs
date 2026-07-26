@@ -10,6 +10,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use tonic::{Request as TonicRequest, Status};
 
 const SKIP_PATHS: &[&str] = &["/healthz", "/readyz", "/metrics"];
 
@@ -79,6 +80,42 @@ pub async fn require_token(req: Request<Body>, next: Next) -> Response {
 /// Extension type carrying the active shared secret through the request.
 #[derive(Clone)]
 pub struct SharedSecret(pub String);
+
+/// Check the service-token JWT on a gRPC request. The interceptor is
+/// responsible for bypassing health/reflection methods before calling this.
+/// Returns `Ok(())` when bypassed (no secret configured) or a valid token is
+/// present.
+pub fn check_grpc<T>(req: &TonicRequest<T>, secret: Option<&str>) -> Result<(), Status> {
+    let Some(secret) = secret else {
+        return Ok(());
+    };
+    let token = req
+        .metadata()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer ").map(|t| t.to_string()))
+        .or_else(|| {
+            req.metadata()
+                .get("x-service-token")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        });
+    let Some(token) = token else {
+        return Err(Status::unauthenticated(
+            "missing or malformed Authorization metadata",
+        ));
+    };
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.validate_exp = true;
+    match decode::<Claims>(
+        token.as_str(),
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &validation,
+    ) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(Status::unauthenticated(format!("invalid token: {e}"))),
+    }
+}
 
 /// Issue a 24h HS256 JWT for the named service. Used by internal callers when
 /// invoking other internal REST endpoints. TODO(P2.12): wire all internal REST
