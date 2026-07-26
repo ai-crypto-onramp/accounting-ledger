@@ -773,10 +773,8 @@ impl Store {
         // COMMIT/ROLLBACK.
         let mut tx = block_on(pool.begin())
             .map_err(|e| PostError::Validation(format!("post: begin tx: {}", e)))?;
-        block_on(
-            sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE").execute(&mut *tx),
-        )
-        .map_err(|e| PostError::Validation(format!("post: set serializable: {}", e)))?;
+        block_on(sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE").execute(&mut *tx))
+            .map_err(|e| PostError::Validation(format!("post: set serializable: {}", e)))?;
         block_on(
             sqlx::query("SELECT pg_advisory_xact_lock($1)")
                 .bind(ENTRIES_CHAIN_ADVISORY_LOCK_KEY)
@@ -784,8 +782,8 @@ impl Store {
         )
         .map_err(|e| PostError::Validation(format!("post: advisory lock: {}", e)))?;
 
-        let prev_hash_initial = last_entry_hash_from_tx(&mut tx)
-            .unwrap_or_else(|| GENESIS_HASH.to_string());
+        let prev_hash_initial =
+            last_entry_hash_from_tx(&mut tx).unwrap_or_else(|| GENESIS_HASH.to_string());
         let mut seq_cursor = next_sequence_from_tx(&mut tx)
             .map_err(|e| PostError::Validation(format!("post: next sequence: {}", e)))?;
 
@@ -1557,9 +1555,7 @@ fn next_sequence_from_db(pool: &sqlx::PgPool, _prev_hash: &str) -> Result<u64, S
     Ok(max_seq as u64)
 }
 
-fn last_entry_hash_from_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> Option<String> {
+fn last_entry_hash_from_tx(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Option<String> {
     let row: Option<(String,)> = block_on(
         sqlx::query_as::<_, (String,)>(
             "SELECT this_hash FROM entries ORDER BY sequence_number DESC LIMIT 1",
@@ -1570,9 +1566,7 @@ fn last_entry_hash_from_tx(
     row.map(|(h,)| h)
 }
 
-fn next_sequence_from_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> Result<u64, String> {
+fn next_sequence_from_tx(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<u64, String> {
     let (max_seq,): (i64,) = block_on(
         sqlx::query_as::<_, (i64,)>("SELECT COALESCE(MAX(sequence_number), 0) FROM entries")
             .fetch_one(&mut **tx),
