@@ -1,0 +1,126 @@
+syntax = "proto3";
+
+package ledger.v1;
+
+option go_package = "github.com/ai-crypto-onramp/contracts/gen/go/ledger/v1;ledgerpb";
+
+// Version: v1
+// Breaking-change policy: minor field additions only; bump to v2 for removals/renames.
+
+// LedgerService is served by ledger-accounting. The transaction-orchestrator
+// is the primary consumer of PostDoubleEntry on the saga's ledger step.
+service LedgerService {
+  // CreateAccount creates a ledger account.
+  rpc CreateAccount(CreateAccountRequest) returns (CreateAccountResponse);
+  // PostPosting posts a balanced double-entry posting (generic).
+  rpc PostPosting(PostingRequest) returns (PostingResponse);
+  // PostDoubleEntry posts a canonical double-entry posting for a completed
+  // purchase saga. This is the high-level RPC the transaction-orchestrator
+  // calls; it expands to a balanced 2+ entry PostPosting under the hood.
+  rpc PostDoubleEntry(PostDoubleEntryRequest) returns (PostDoubleEntryResponse);
+  // GetPosting returns a posting by id.
+  rpc GetPosting(GetPostingRequest) returns (PostingRecord);
+  // GetBalance returns the balance of an account (optionally filtered by asset).
+  rpc GetBalance(GetBalanceRequest) returns (BalanceResponse);
+  // VerifyChain verifies the hash chain of the ledger.
+  rpc VerifyChain(VerifyChainRequest) returns (VerifyChainResponse);
+}
+
+message CreateAccountRequest {
+  string account_id = 1;     // optional; assigned by the ledger when empty
+  string type = 2;
+  string asset_class = 3;
+  string label = 4;
+  string parent_id = 5;     // optional parent account
+}
+
+message CreateAccountResponse {
+  string account_id = 1;
+}
+
+message EntryInput {
+  string account_id = 1;
+  string direction = 2;     // "debit" | "credit"
+  uint64 amount = 3;        // minor units
+  string asset = 4;          // currency / asset code
+}
+
+message PostingRequest {
+  string posting_id = 1;    // idempotency key
+  repeated EntryInput entries = 2;
+  string memo = 3;          // optional
+  string ref_tx_id = 4;     // optional correlation to a saga tx
+}
+
+message PostingResponse {
+  string posting_id = 1;
+  string status = 2;
+  repeated string entry_ids = 3;
+  string hash_head = 4;     // hash-chain head after this posting
+}
+
+message PostDoubleEntryRequest {
+  string tx_id = 1;          // saga transaction id (idempotency key)
+  string user_id = 2;
+  uint64 amount = 3;         // minor units of the fiat leg
+  string asset = 4;          // fiat currency code
+  string rail = 5;           // payment rail
+  // Optional pre-resolved account ids. When empty the ledger resolves the
+  // canonical accounts from the (asset, rail) tuple.
+  string debit_account_id = 6;
+  string credit_account_id = 7;
+  string memo = 8;
+}
+
+message PostDoubleEntryResponse {
+  string journal_id = 1;     // posting_id of the resulting double entry
+  string status = 2;
+  string hash_head = 3;
+}
+
+message GetPostingRequest {
+  string posting_id = 1;
+}
+
+message EntryRecord {
+  string entry_id = 1;
+  string posting_id = 2;
+  string account_id = 3;
+  string direction = 4;
+  uint64 amount = 5;
+  string asset = 6;
+  uint64 sequence_number = 7;
+  string prev_hash = 8;
+  string this_hash = 9;
+  string created_at = 10;   // RFC3339
+}
+
+message PostingRecord {
+  string posting_id = 1;
+  string ref_tx_id = 2;
+  string memo = 3;
+  string status = 4;
+  string hash_head = 5;
+  repeated EntryRecord entries = 6;
+  string created_at = 7;   // RFC3339
+}
+
+message GetBalanceRequest {
+  string account_id = 1;
+  string asset = 2;        // optional filter
+}
+
+message BalanceResponse {
+  string account_id = 1;
+  string asset = 2;
+  string balance = 3;       // signed decimal string in minor units
+  string as_of_ts = 4;      // RFC3339
+}
+
+message VerifyChainRequest {}
+
+message VerifyChainResponse {
+  bool ok = 1;
+  string entry_id = 2;      // first broken entry, empty when ok=true
+  string reason = 3;        // empty when ok=true
+}
