@@ -156,7 +156,13 @@ mod tests {
     use axum::routing::get;
     use axum::Extension;
     use http_body_util::BodyExt;
+    use std::sync::{Mutex, OnceLock};
     use tower::ServiceExt;
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    fn env_lock() -> &'static Mutex<()> {
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn ok_handler() -> axum::Router {
         axum::Router::new()
@@ -241,6 +247,133 @@ mod tests {
             .unwrap();
         let (s, _) = run(req, None).await;
         assert_eq!(s, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn empty_bearer_token_returns_401() {
+        let req = Request::builder()
+            .uri("/v1/postings")
+            .header("authorization", "Bearer ")
+            .body(Body::empty())
+            .unwrap();
+        let (s, _) = run(req, Some("s3cret".to_string())).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn non_bearer_scheme_returns_401() {
+        let req = Request::builder()
+            .uri("/v1/postings")
+            .header("authorization", "Basic abc")
+            .body(Body::empty())
+            .unwrap();
+        let (s, _) = run(req, Some("s3cret".to_string())).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn expired_token_returns_401() {
+        let secret = "s3cret";
+        let claims = Claims {
+            sub: "svc".to_string(),
+            iat: 0,
+            exp: 1,
+        };
+        let tok = jsonwebtoken::encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+        let req = Request::builder()
+            .uri("/v1/postings")
+            .header("authorization", format!("Bearer {tok}"))
+            .body(Body::empty())
+            .unwrap();
+        let (s, _) = run(req, Some(secret.to_string())).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn check_grpc_bypasses_when_no_secret() {
+        let req = TonicRequest::new(());
+        assert!(check_grpc(&req, None).is_ok());
+    }
+
+    #[test]
+    fn check_grpc_rejects_missing_token() {
+        let req = TonicRequest::new(());
+        assert!(check_grpc(&req, Some("s")).is_err());
+    }
+
+    #[test]
+    fn check_grpc_accepts_valid_bearer() {
+        let secret = "s3cret";
+        let tok = issue("svc", secret).unwrap();
+        let mut req = TonicRequest::new(());
+        req.metadata_mut()
+            .insert("authorization", format!("Bearer {tok}").parse().unwrap());
+        assert!(check_grpc(&req, Some(secret)).is_ok());
+    }
+
+    #[test]
+    fn check_grpc_accepts_valid_x_service_token() {
+        let secret = "s3cret";
+        let tok = issue("svc", secret).unwrap();
+        let mut req = TonicRequest::new(());
+        req.metadata_mut()
+            .insert("x-service-token", tok.parse().unwrap());
+        assert!(check_grpc(&req, Some(secret)).is_ok());
+    }
+
+    #[test]
+    fn check_grpc_rejects_invalid_token() {
+        let mut req = TonicRequest::new(());
+        req.metadata_mut()
+            .insert("authorization", "Bearer nope".parse().unwrap());
+        assert!(check_grpc(&req, Some("s")).is_err());
+    }
+
+    #[test]
+    fn issue_and_decode_roundtrip() {
+        let secret = "s3cret";
+        let tok = issue("svc", secret).unwrap();
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.validate_exp = true;
+        let claims = decode::<Claims>(
+            &tok,
+            &DecodingKey::from_secret(secret.as_bytes()),
+            &validation,
+        )
+        .unwrap();
+        assert_eq!(claims.claims.sub, "svc");
+    }
+
+    #[test]
+    fn secret_from_env_dev_mode_unset_returns_none() {
+        let _g = env_lock().lock().unwrap();
+        std::env::set_var("DEV_MODE", "1");
+        std::env::remove_var("SERVICE_TOKEN_SECRET");
+        assert!(secret_from_env().is_none());
+        std::env::remove_var("DEV_MODE");
+    }
+
+    #[test]
+    fn secret_from_env_returns_secret_when_set() {
+        let _g = env_lock().lock().unwrap();
+        std::env::set_var("SERVICE_TOKEN_SECRET", "abc");
+        assert_eq!(secret_from_env().as_deref(), Some("abc"));
+        std::env::remove_var("SERVICE_TOKEN_SECRET");
+    }
+
+    #[test]
+    fn secret_from_env_empty_falls_through() {
+        let _g = env_lock().lock().unwrap();
+        std::env::set_var("SERVICE_TOKEN_SECRET", "");
+        std::env::set_var("DEV_MODE", "1");
+        assert!(secret_from_env().is_none());
+        std::env::remove_var("SERVICE_TOKEN_SECRET");
+        std::env::remove_var("DEV_MODE");
     }
 
     #[test]

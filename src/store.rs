@@ -2188,4 +2188,265 @@ mod tests {
         // all assets sum
         assert_eq!(store.balance("uc", ""), Some(-35));
     }
+
+    #[test]
+    fn with_pool_and_salt_constructors() {
+        let store = Store::new().with_salt("pepper".to_string());
+        assert_eq!(store.salt, "pepper");
+        assert!(store.pool.is_none());
+    }
+
+    #[test]
+    fn with_audit_sink_builder_attaches_sink() {
+        let store = Store::new().with_audit_sink(crate::audit::AuditSink::new(None));
+        assert!(store.audit_sink.is_some());
+    }
+
+    #[test]
+    fn entry_count_in_memory_reflects_posts() {
+        let store = Store::new();
+        setup(&store);
+        assert_eq!(store.entry_count(), 0);
+        store.post(balanced_posting("ec1", 1, "USD")).unwrap();
+        assert_eq!(store.entry_count(), 2);
+    }
+
+    #[test]
+    fn post_rejects_unknown_asset() {
+        let store = Store::new();
+        setup(&store);
+        let err = store.post(balanced_posting("unk", 1, "NOPE")).unwrap_err();
+        assert!(err.message().contains("unknown asset"));
+    }
+
+    #[test]
+    fn post_rejects_zero_amount() {
+        let store = Store::new();
+        setup(&store);
+        let req = serde_json::from_value(serde_json::json!({
+            "posting_id": "zero",
+            "entries": [
+                { "account_id": "uc", "direction": "DEBIT", "amount": 0, "asset": "USD" },
+                { "account_id": "op", "direction": "CREDIT", "amount": 0, "asset": "USD" }
+            ]
+        }))
+        .unwrap();
+        let err = store.post(req).unwrap_err();
+        assert!(err.message().contains("amount must be > 0"));
+    }
+
+    #[test]
+    fn post_rejects_too_many_entries() {
+        let store = Store::new();
+        setup(&store);
+        let mut entries = Vec::new();
+        for i in 0..(MAX_ENTRIES_PER_POSTING + 1) {
+            entries.push(serde_json::json!({
+                "account_id": "uc",
+                "direction": if i % 2 == 0 { "DEBIT" } else { "CREDIT" },
+                "amount": 1,
+                "asset": "USD"
+            }));
+        }
+        let req = serde_json::from_value(serde_json::json!({
+            "posting_id": "toomany",
+            "entries": entries
+        }))
+        .unwrap();
+        let err = store.post(req).unwrap_err();
+        assert!(err.message().contains("too many entries"));
+    }
+
+    #[test]
+    fn post_rejects_unbalanced_per_asset() {
+        let store = Store::new();
+        setup(&store);
+        let req = serde_json::from_value(serde_json::json!({
+            "posting_id": "ub",
+            "entries": [
+                { "account_id": "uc", "direction": "DEBIT", "amount": 100, "asset": "USD" },
+                { "account_id": "op", "direction": "CREDIT", "amount": 50, "asset": "USD" }
+            ]
+        }))
+        .unwrap();
+        let err = store.post(req).unwrap_err();
+        assert!(err.message().contains("unbalanced"));
+    }
+
+    #[test]
+    fn post_rejects_invalid_direction() {
+        let store = Store::new();
+        setup(&store);
+        let req = serde_json::from_value(serde_json::json!({
+            "posting_id": "baddir",
+            "entries": [
+                { "account_id": "uc", "direction": "SIDEWAYS", "amount": 10, "asset": "USD" },
+                { "account_id": "op", "direction": "CREDIT", "amount": 10, "asset": "USD" }
+            ]
+        }))
+        .unwrap();
+        let err = store.post(req).unwrap_err();
+        assert!(err.message().contains("invalid direction"));
+    }
+
+    #[test]
+    fn post_rejects_account_not_found_in_memory() {
+        let store = Store::new();
+        let req = serde_json::from_value(serde_json::json!({
+            "posting_id": "nofound",
+            "entries": [
+                { "account_id": "ghost", "direction": "DEBIT", "amount": 10, "asset": "USD" },
+                { "account_id": "op", "direction": "CREDIT", "amount": 10, "asset": "USD" }
+            ]
+        }))
+        .unwrap();
+        let err = store.post(req).unwrap_err();
+        assert!(err.message().contains("account not found"));
+    }
+
+    #[test]
+    fn post_rejects_unknown_account_type_in_memory() {
+        let store = Store::new();
+        {
+            let mut state = store.inner.lock();
+            state.accounts.insert(
+                "weird".to_string(),
+                crate::account::Account {
+                    account_id: "weird".to_string(),
+                    type_name: "bogus_type".to_string(),
+                    asset_class: "BOTH".to_string(),
+                    label: "w".to_string(),
+                    parent_id: None,
+                    status: "ACTIVE".to_string(),
+                    created_at: "1".to_string(),
+                },
+            );
+        }
+        let req = serde_json::from_value(serde_json::json!({
+            "posting_id": "unktype",
+            "entries": [
+                { "account_id": "weird", "direction": "DEBIT", "amount": 10, "asset": "USD" },
+                { "account_id": "weird", "direction": "CREDIT", "amount": 10, "asset": "USD" }
+            ]
+        }))
+        .unwrap();
+        let err = store.post(req).unwrap_err();
+        assert!(err.message().contains("unknown account type"));
+    }
+
+    #[test]
+    fn post_replay_in_memory_returns_existing() {
+        let store = Store::new();
+        setup(&store);
+        let req = balanced_posting("rep-in-mem", 100, "USD");
+        let (r1, replay1) = store.post(req.clone()).unwrap();
+        assert!(!replay1);
+        let (r2, replay2) = store.post(req).unwrap();
+        assert!(replay2);
+        assert_eq!(r1.entry_ids, r2.entry_ids);
+    }
+
+    #[test]
+    fn ledger_in_memory_next_cursor_when_exceeding_limit() {
+        let store = Store::new();
+        setup(&store);
+        for i in 0..5 {
+            store
+                .post(balanced_posting(&format!("cur{}", i), 1, "USD"))
+                .unwrap();
+        }
+        let page = store.ledger("uc", None, None, 2, None).unwrap();
+        assert_eq!(page.entries.len(), 2);
+        assert!(page.next_cursor.is_some());
+    }
+
+    #[test]
+    fn reconcile_snapshot_in_memory_matches() {
+        let store = Store::new();
+        setup(&store);
+        store.post(balanced_posting("rsnap", 100, "USD")).unwrap();
+        let snaps = store.write_snapshots();
+        for s in &snaps {
+            assert!(store.reconcile_snapshot(s));
+        }
+    }
+
+    #[test]
+    fn global_chain_head_in_memory_tracks_posts() {
+        let store = Store::new();
+        assert_eq!(store.global_chain_head(), chart::GENESIS_HASH);
+        setup(&store);
+        let (resp, _) = store.post(balanced_posting("gch", 100, "USD")).unwrap();
+        assert_eq!(store.global_chain_head(), resp.hash_head);
+    }
+
+    #[test]
+    fn verify_chain_in_memory_ok_after_posts() {
+        let store = Store::new();
+        setup(&store);
+        store.post(balanced_posting("vc-ok", 100, "USD")).unwrap();
+        assert!(store.verify_chain().is_ok());
+    }
+
+    #[test]
+    fn list_accounts_with_type_filter_in_memory() {
+        let store = Store::new();
+        setup(&store);
+        let filtered = store.list_accounts(Some("user_custodial"));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].account_id, "uc");
+        let none_filter = store.list_accounts(Some("bogus"));
+        assert!(none_filter.is_empty());
+    }
+
+    #[test]
+    fn create_account_rejects_duplicate_in_memory() {
+        let store = Store::new();
+        store
+            .create_account(acct_req("dup", "user_custodial", "BOTH"))
+            .unwrap();
+        let err = store
+            .create_account(acct_req("dup", "user_custodial", "BOTH"))
+            .unwrap_err();
+        assert!(err.contains("already exists"));
+    }
+
+    #[test]
+    fn get_posting_missing_in_memory_returns_none() {
+        let store = Store::new();
+        assert!(store.get_posting("nope").is_none());
+    }
+
+    #[test]
+    fn hash_chain_anchor_present_after_post_in_memory() {
+        let store = Store::new();
+        setup(&store);
+        let (resp, _) = store.post(balanced_posting("hca", 100, "USD")).unwrap();
+        let anchor = store.hash_chain_anchor("hca").unwrap();
+        assert_eq!(anchor.head_hash, resp.hash_head);
+    }
+
+    #[test]
+    fn balance_via_snapshot_with_snapshot_present_in_memory() {
+        let store = Store::new();
+        setup(&store);
+        store
+            .post(balanced_posting("bvs-snap", 100, "USD"))
+            .unwrap();
+        store.write_snapshots();
+        // No additional postings -> delta 0, returns snapshot balance.
+        assert_eq!(store.balance_via_snapshot("uc", "USD"), Some(100));
+    }
+
+    #[test]
+    fn latest_snapshot_empty_asset_matches_any_in_memory() {
+        let store = Store::new();
+        setup(&store);
+        store
+            .post(balanced_posting("ls-empty", 100, "USD"))
+            .unwrap();
+        store.write_snapshots();
+        let s = store.latest_snapshot("uc", "").unwrap();
+        assert_eq!(s.account_id, "uc");
+    }
 }

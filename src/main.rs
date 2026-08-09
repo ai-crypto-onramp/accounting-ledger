@@ -54,11 +54,12 @@ fn app() -> axum::Router {
     }
     let store = Store::new();
     let secret = authtoken::secret_from_env();
-    let mut router = handlers::router(store);
+    let router = handlers::router(store).layer(axum::middleware::from_fn(authtoken::require_token));
     if let Some(s) = secret.clone() {
-        router = router.layer(axum::Extension(authtoken::SharedSecret(s)));
+        router.layer(axum::Extension(authtoken::SharedSecret(s)))
+    } else {
+        router
     }
-    router.layer(axum::middleware::from_fn(authtoken::require_token))
 }
 
 #[allow(dead_code)]
@@ -173,11 +174,13 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(rest_addr).await.unwrap();
     let secret = authtoken::secret_from_env();
-    let mut rest_router = handlers::router(rest_store);
-    if let Some(s) = secret.clone() {
-        rest_router = rest_router.layer(axum::Extension(authtoken::SharedSecret(s)));
-    }
-    let rest_router = rest_router.layer(axum::middleware::from_fn(authtoken::require_token));
+    let rest_router =
+        handlers::router(rest_store).layer(axum::middleware::from_fn(authtoken::require_token));
+    let rest_router = if let Some(s) = secret.clone() {
+        rest_router.layer(axum::Extension(authtoken::SharedSecret(s)))
+    } else {
+        rest_router
+    };
     axum::serve(listener, rest_router).await.unwrap();
 }
 
@@ -1107,5 +1110,54 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let postings = val["postings"].as_array().unwrap();
         assert_eq!(postings.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn run_grpc_serves_until_cancelled() {
+        let store = Store::new();
+        let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let store_clone = store.clone();
+        let handle = tokio::spawn(async move {
+            run_grpc(store_clone, addr).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn run_snapshot_task_writes_snapshots() {
+        let store = Store::new();
+        let _ = store
+            .create_account(
+                serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH"))
+                    .unwrap(),
+            )
+            .unwrap();
+        let _ = store
+            .create_account(
+                serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT"))
+                    .unwrap(),
+            )
+            .unwrap();
+        let _ = store
+            .post(serde_json::from_value(balanced_posting_body("snap-task")).unwrap())
+            .unwrap();
+        std::env::set_var("SNAPSHOT_INTERVAL_MINUTES", "0");
+        let store_clone = store.clone();
+        let handle = tokio::spawn(async move {
+            run_snapshot_task(store_clone).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        handle.abort();
+        let _ = handle.await;
+        std::env::remove_var("SNAPSHOT_INTERVAL_MINUTES");
+        assert!(!store.write_snapshots().is_empty());
+    }
+
+    #[test]
+    fn verify_chain_at_startup_passes_on_clean_store() {
+        let store = Store::new();
+        verify_chain_at_startup(&store);
     }
 }

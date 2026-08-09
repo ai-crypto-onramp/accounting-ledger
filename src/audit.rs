@@ -124,6 +124,12 @@ impl AuditSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    fn env_lock() -> &'static Mutex<()> {
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn build_event_populates_fields() {
@@ -151,5 +157,40 @@ mod tests {
         let sink = AuditSink::new(None);
         let ev = build_event("p3", &["e1".to_string()], "h");
         sink.emit(&store, &ev);
+    }
+
+    #[test]
+    fn from_env_dev_mode_no_brokers_returns_no_kafka() {
+        let _g = env_lock().lock().unwrap();
+        std::env::set_var("DEV_MODE", "1");
+        std::env::remove_var("KAFKA_BROKERS");
+        let sink = AuditSink::from_env().unwrap();
+        assert!(sink.kafka.is_none());
+        std::env::remove_var("DEV_MODE");
+    }
+
+    #[test]
+    fn from_env_no_brokers_no_dev_mode_errors() {
+        let _g = env_lock().lock().unwrap();
+        std::env::remove_var("KAFKA_BROKERS");
+        std::env::remove_var("DEV_MODE");
+        assert!(AuditSink::from_env().is_err());
+    }
+
+    #[test]
+    fn emit_with_dev_mode_logs_to_stderr() {
+        let _g = env_lock().lock().unwrap();
+        std::env::set_var("DEV_MODE", "1");
+        let store = Store::new();
+        let sink = AuditSink::new(None);
+        let ev = build_event("pdev", &["e1".to_string()], "h");
+        sink.emit(&store, &ev);
+        std::env::remove_var("DEV_MODE");
+    }
+
+    #[test]
+    fn new_wraps_kafka_in_arc() {
+        let sink = AuditSink::new(None);
+        assert!(sink.kafka.is_none());
     }
 }

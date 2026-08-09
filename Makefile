@@ -1,10 +1,13 @@
-.PHONY: build test run docker-build docker-run clean
+.PHONY: build test cover-check run docker-build docker-run clean
 
 build:
 	cargo build --release
 
 test:
 	cargo llvm-cov --codecov --output-path codecov.json
+
+cover-check:
+	@cargo llvm-cov --summary-only 2>/dev/null | awk '/^TOTAL/ {gsub(/%/,"",$$10); if($$10+0 < 80) {print "Coverage " $$10 "% below 80% threshold"; exit 1} else {print "Coverage " $$10 "% OK"}}'
 
 run:
 	cargo run --release
