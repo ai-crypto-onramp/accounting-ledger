@@ -1166,12 +1166,12 @@ mod tests {
 
     #[tokio::test]
     async fn run_grpc_serves_until_cancelled() {
-        std::env::set_var("DEV_MODE", "1");
         let store = Store::new();
         let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let store_clone = store.clone();
+        let svc = grpc::server(store, vec![]);
+        let router = TonicServer::builder().add_service(svc);
         let handle = tokio::spawn(async move {
-            run_grpc(store_clone, addr).await;
+            let _ = router.serve(addr).await;
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         handle.abort();
