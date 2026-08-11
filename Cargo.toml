@@ -21,7 +21,7 @@ sha2 = "0.10"
 hex = "0.4"
 parking_lot = "0.12"
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-none", "derive"] }
-tonic = "0.12"
+tonic = { version = "0.12", features = ["tls", "tls-roots"] }
 prost = "0.13"
 tonic-reflection = "0.12"
 rdkafka = { version = "0.36", features = ["tokio"] }
@@ -31,7 +31,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 opentelemetry = "0.27"
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "trace"], default-features = false }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "trace", "tls"], default-features = false }
 tracing-opentelemetry = "0.28"
 jsonwebtoken = "9"
 
@@ -39,6 +39,8 @@ jsonwebtoken = "9"
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-none"] }
+rcgen = { version = "0.13", features = ["pem"] }
+tempfile = "3"
 
 [build-dependencies]
 tonic-build = "0.12"

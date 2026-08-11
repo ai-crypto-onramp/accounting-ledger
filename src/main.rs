@@ -4,8 +4,9 @@ use accounting_ledger::config;
 use accounting_ledger::grpc;
 use accounting_ledger::handlers;
 use accounting_ledger::store::Store;
+use accounting_ledger::tls;
 use opentelemetry::{global, trace::TracerProvider as _, KeyValue};
-use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
 use opentelemetry_sdk::{runtime::Tokio, Resource};
 use tonic::transport::Server as TonicServer;
 use tracing_subscriber::layer::SubscriberExt;
@@ -19,11 +20,14 @@ fn init_tracing() {
         .ok()
         .filter(|s| !s.trim().is_empty());
     let otlp_layer = endpoint.and_then(|ep| {
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
+        let mut exporter_builder = opentelemetry_otlp::SpanExporter::builder()
             .with_tonic()
-            .with_endpoint(&ep)
-            .build()
-            .ok()?;
+            .with_endpoint(&ep);
+        let tls_config = load_otlp_tls().ok().flatten();
+        if let Some(cfg) = tls_config {
+            exporter_builder = exporter_builder.with_tls_config(cfg);
+        }
+        let exporter = exporter_builder.build().ok()?;
         let provider = opentelemetry_sdk::trace::TracerProvider::builder()
             .with_batch_exporter(exporter, Tokio)
             .with_resource(Resource::new([
@@ -45,6 +49,37 @@ fn init_tracing() {
     } else {
         registry().with(filter).with(fmt_layer).init();
     }
+}
+
+fn load_otlp_tls() -> anyhow::Result<Option<tonic::transport::ClientTlsConfig>> {
+    let cert = std::env::var("TLS_CERT_FILE").unwrap_or_default();
+    let key = std::env::var("TLS_KEY_FILE").unwrap_or_default();
+    let ca = std::env::var("TLS_CA_FILE").unwrap_or_default();
+    if cert.is_empty() && key.is_empty() && ca.is_empty() {
+        if tls::is_dev_mode() {
+            return Ok(None);
+        }
+        return Err(anyhow::anyhow!(
+            "TLS_CERT_FILE/TLS_KEY_FILE/TLS_CA_FILE required when DEV_MODE!=1"
+        ));
+    }
+    if cert.is_empty() || key.is_empty() || ca.is_empty() {
+        return Err(anyhow::anyhow!(
+            "TLS_CERT_FILE, TLS_KEY_FILE and TLS_CA_FILE must all be set together"
+        ));
+    }
+    let cert_pem = std::fs::read_to_string(&cert)
+        .map_err(|e| anyhow::anyhow!("read cert file {}: {}", cert, e))?;
+    let key_pem = std::fs::read_to_string(&key)
+        .map_err(|e| anyhow::anyhow!("read key file {}: {}", key, e))?;
+    let ca_pem =
+        std::fs::read_to_string(&ca).map_err(|e| anyhow::anyhow!("read ca file {}: {}", ca, e))?;
+    let identity = tonic::transport::Identity::from_pem(cert_pem, key_pem);
+    let ca_cert = tonic::transport::Certificate::from_pem(ca_pem);
+    let cfg = tonic::transport::ClientTlsConfig::new()
+        .identity(identity)
+        .ca_certificate(ca_cert);
+    Ok(Some(cfg))
 }
 
 #[allow(dead_code)]
@@ -73,7 +108,24 @@ async fn run_grpc(store: Store, addr: std::net::SocketAddr) {
     let allowed_callers: Vec<String> = caller.split(',').map(|s| s.trim().to_string()).collect();
     let svc = grpc::server(store, allowed_callers);
     let secret = authtoken::secret_from_env();
-    let builder = TonicServer::builder();
+    let mut builder = TonicServer::builder();
+    let tls_result = tls::load_server_tls();
+    match tls_result {
+        Ok(Some(tls_material)) => {
+            builder = match builder.tls_config(tls_material.server_config) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("[grpc] TLS config error: {}", e);
+                    return;
+                }
+            };
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("[grpc] TLS config error: {}", e);
+            return;
+        }
+    }
     let router = builder
         .layer(tonic::service::interceptor(
             #[allow(clippy::result_large_err)]
@@ -1114,6 +1166,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_grpc_serves_until_cancelled() {
+        std::env::set_var("DEV_MODE", "1");
         let store = Store::new();
         let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
         let store_clone = store.clone();
@@ -1159,5 +1212,82 @@ mod tests {
     fn verify_chain_at_startup_passes_on_clean_store() {
         let store = Store::new();
         verify_chain_at_startup(&store);
+    }
+
+    static OTLP_TLS_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn otlp_lock() -> std::sync::MutexGuard<'static, ()> {
+        OTLP_TLS_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn clear_otlp_env() {
+        std::env::remove_var("TLS_CERT_FILE");
+        std::env::remove_var("TLS_KEY_FILE");
+        std::env::remove_var("TLS_CA_FILE");
+        std::env::set_var("DEV_MODE", "1");
+    }
+
+    #[test]
+    fn load_otlp_tls_dev_mode_returns_none() {
+        let _g = otlp_lock();
+        clear_otlp_env();
+        std::env::set_var("DEV_MODE", "1");
+        let cfg = load_otlp_tls().unwrap();
+        assert!(cfg.is_none());
+        clear_otlp_env();
+    }
+
+    #[test]
+    fn load_otlp_tls_prod_missing_env_is_error() {
+        let _g = otlp_lock();
+        clear_otlp_env();
+        std::env::set_var("DEV_MODE", "0");
+        assert!(load_otlp_tls().is_err());
+        clear_otlp_env();
+    }
+
+    #[test]
+    fn load_otlp_tls_partial_set_is_error() {
+        let _g = otlp_lock();
+        clear_otlp_env();
+        std::env::set_var("TLS_CERT_FILE", "/x/cert.pem");
+        std::env::set_var("DEV_MODE", "1");
+        assert!(load_otlp_tls().is_err());
+        clear_otlp_env();
+    }
+
+    #[test]
+    fn load_otlp_tls_bad_cert_files_is_error() {
+        let _g = otlp_lock();
+        clear_otlp_env();
+        std::env::set_var("TLS_CERT_FILE", "/no/cert.pem");
+        std::env::set_var("TLS_KEY_FILE", "/no/key.pem");
+        std::env::set_var("TLS_CA_FILE", "/no/ca.pem");
+        std::env::set_var("DEV_MODE", "0");
+        assert!(load_otlp_tls().is_err());
+        clear_otlp_env();
+    }
+
+    #[test]
+    fn load_otlp_tls_valid_certs_returns_config() {
+        let _g = otlp_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let certified_key =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let cert_pem = certified_key.cert.pem();
+        let key_pem = certified_key.key_pair.serialize_pem();
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+        let ca_path = dir.path().join("ca.pem");
+        std::fs::write(&cert_path, &cert_pem).unwrap();
+        std::fs::write(&key_path, &key_pem).unwrap();
+        std::fs::write(&ca_path, &cert_pem).unwrap();
+        std::env::set_var("TLS_CERT_FILE", cert_path.to_string_lossy().to_string());
+        std::env::set_var("TLS_KEY_FILE", key_path.to_string_lossy().to_string());
+        std::env::set_var("TLS_CA_FILE", ca_path.to_string_lossy().to_string());
+        std::env::set_var("DEV_MODE", "0");
+        let cfg = load_otlp_tls().unwrap().unwrap();
+        assert!(format!("{:?}", cfg).contains("ClientTlsConfig"));
+        clear_otlp_env();
     }
 }

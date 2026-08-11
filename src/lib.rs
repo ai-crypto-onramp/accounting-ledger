@@ -10,4 +10,5 @@ pub mod hashchain;
 pub mod posting;
 pub mod snapshot;
 pub mod store;
+pub mod tls;
 pub mod treasury;
